@@ -6,49 +6,23 @@ import numpy as np
 from matplotlib import pyplot as plt
 import tensorflow as tf
 import uuid
-from tensorflow.keras.metrics import Precision, Recall
-from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, Flatten, Dense, Layer
-from tensorflow.keras.models import Model
 
-# =================================================================
-# 1. ÖZEL L1Dist KATMANI TANIMI (GÜNCELLENMİŞ ÇÖZÜM)
-# =================================================================
-class L1Dist(Layer):
-    """L1 Mutlak Uzaklık Katmanı"""
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        
-    def call(self, inputs):
-        # inputs: [input_embedding, validation_embedding]
-        input_embedding, validation_embedding = inputs
-        # Tensör farkı alma işlemi
-        return tf.math.abs(input_embedding - validation_embedding)
-    
-    # KESİN ÇÖZÜM: compute_output_shape metodunu, Batch_Size'ı None olarak koruyacak şekilde güncelliyoruz.
-    def compute_output_shape(self, input_shape):
-        # input_shape bir tuple: (shape1, shape2). shape1 = (None, 256) olmalı.
-        # Bu, çıkışın tam shape tuple'ını döndürür: (None, 256)
-        return input_shape[0]
-    
-    def get_config(self):
-        return super().get_config()
-
-# GPU memory ayarları
+#GPU memory settings
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True) 
 
-# Setup paths
+#setup paths
 POS_PATH = os.path.join('data', 'positive')
 NEG_PATH = os.path.join('data', 'negative')
 ANC_PATH = os.path.join('data', 'anchor')
 
-# Application data paths
+#application data paths
 APPLICATION_DATA_DIR = 'application_data'
 INPUT_IMAGE_DIR = os.path.join(APPLICATION_DATA_DIR, 'input_image')
 VERIFICATION_IMAGES_DIR = os.path.join(APPLICATION_DATA_DIR, 'verification_images')
 
-# Make the directories
+#making the directories
 os.makedirs(POS_PATH, exist_ok=True)
 os.makedirs(NEG_PATH, exist_ok=True)
 os.makedirs(ANC_PATH, exist_ok=True)
@@ -57,7 +31,7 @@ os.makedirs(VERIFICATION_IMAGES_DIR, exist_ok=True)
 
 print("Sistem hazır!")
 
-# Preprocess fonksiyonu
+#function for preprocessing images
 def preprocess(file_path):
     byte_img = tf.io.read_file(file_path)
     img = tf.io.decode_jpeg(byte_img)
@@ -65,45 +39,49 @@ def preprocess(file_path):
     img = img / 255.0
     return img
 
-# Model oluşturma fonksiyonları
+#function to create the embedding model
 def make_embedding():
-    inp = Input(shape=(100, 100, 3), name='input_image')
+    inp = tf.keras.layers.Input(shape=(100, 100, 3), name='input_image')
+    #basic model
+    c1 = tf.keras.layers.Conv2D(32, (3, 3), activation='relu')(inp)
+    m1 = tf.keras.layers.MaxPooling2D((2, 2))(c1)
     
-    # Basit model
-    c1 = Conv2D(32, (3, 3), activation='relu')(inp)
-    m1 = MaxPooling2D((2, 2))(c1)
+    c2 = tf.keras.layers.Conv2D(64, (3, 3), activation='relu')(m1)
+    m2 = tf.keras.layers.MaxPooling2D((2, 2))(c2)
     
-    c2 = Conv2D(64, (3, 3), activation='relu')(m1)
-    m2 = MaxPooling2D((2, 2))(c2)
+    c3 = tf.keras.layers.Conv2D(128, (3, 3), activation='relu')(m2)
+    m3 = tf.keras.layers.MaxPooling2D((2, 2))(c3)
     
-    c3 = Conv2D(128, (3, 3), activation='relu')(m2)
-    m3 = MaxPooling2D((2, 2))(c3)
+    f1 = tf.keras.layers.Flatten()(m3)
+    d1 = tf.keras.layers.Dense(256, activation='sigmoid')(f1)
     
-    f1 = Flatten()(m3)
-    d1 = Dense(256, activation='sigmoid')(f1)
-    
-    return Model(inputs=[inp], outputs=[d1], name='embedding')
+    #use outputs=d1 instead of outputs=[d1] to avoid errors
+    return tf.keras.models.Model(inputs=[inp], outputs=d1, name='embedding')
 
-# =================================================================
-# 3. make_siamese_model FONKSİYONU 
-# =================================================================
 def make_siamese_model():
-    input_image = Input(name='input_img', shape=(100, 100, 3))
-    validation_image = Input(name='validation_img', shape=(100, 100, 3))
+    input_image = tf.keras.layers.Input(name='input_img', shape=(100, 100, 3))
+    validation_image = tf.keras.layers.Input(name='validation_img', shape=(100, 100, 3))
     
+    #shared embedding model
     embedding_model = make_embedding()
     
+    #get the embeddings
     inp_embedding = embedding_model(input_image)
     val_embedding = embedding_model(validation_image)
-    
-    # L1Dist KULLANILMALI
-    distances = L1Dist(name='l1_distance')([inp_embedding, val_embedding]) 
-    
-    classifier = Dense(1, activation='sigmoid')(distances)
-    
-    return Model(inputs=[input_image, validation_image], outputs=classifier, name='SiameseNetwork')
 
-# Negative verileri hazırla
+    #compute L1 distance between the embeddings
+    distances = tf.keras.layers.Lambda(
+        lambda x: tf.abs(x[0] - x[1]),
+        output_shape=(256,),
+        name='l1_distance'
+    )([inp_embedding, val_embedding])
+    
+    #classification
+    classifier = tf.keras.layers.Dense(1, activation='sigmoid')(distances)
+    
+    return tf.keras.models.Model(inputs=[input_image, validation_image], outputs=classifier, name='SiameseNetwork')
+
+#getting the negative data ready
 def prepare_negative_data():
     print("Negative veriler kontrol ediliyor...")
     if len(os.listdir(NEG_PATH)) == 0:
@@ -114,7 +92,7 @@ def prepare_negative_data():
             cv2.imwrite(imgname, random_image)
         print("50 adet negative örnek oluşturuldu.")
 
-# Verification images hazırla
+#ready the verification data
 def prepare_verification_data():
     if len(os.listdir(VERIFICATION_IMAGES_DIR)) == 0:
         print("Verification images klasörü dolduruluyor...")
@@ -127,11 +105,11 @@ def prepare_verification_data():
                 shutil.copy2(src, dst)
             print(f"{min(5, len(positive_files))} adet verification image eklendi.")
 
-# Model eğitimi
+# training the model
 def train_model():
     print("\n=== MODEL EĞİTİMİ BAŞLIYOR ===")
     
-    # Veri kontrolü
+    #data control
     anchor_files = [f for f in os.listdir(ANC_PATH) if f.endswith('.jpg')]
     positive_files = [f for f in os.listdir(POS_PATH) if f.endswith('.jpg')]
     negative_files = [f for f in os.listdir(NEG_PATH) if f.endswith('.jpg')]
@@ -148,18 +126,16 @@ def train_model():
     take_count = min(20, min_files)
     print(f"Her kategoriden {take_count} resim kullanılacak")
 
-    # BASİT DATASET OLUŞTURMA
     def create_simple_dataset():
         anchors = []
         comparisons = []
         labels = []
-        
-        # Random seçim
+
         selected_anchors = random.sample(anchor_files, take_count)
         selected_positives = random.sample(positive_files, take_count)
         selected_negatives = random.sample(negative_files, take_count)
         
-        # Positive pairs
+        #positive pairs
         for i in range(take_count):
             anchor_path = os.path.join(ANC_PATH, selected_anchors[i])
             positive_path = os.path.join(POS_PATH, selected_positives[i])
@@ -169,9 +145,9 @@ def train_model():
             
             anchors.append(anchor_img)
             comparisons.append(positive_img)
-            labels.append(1.0)  # Positive pair
+            labels.append(1.0) #for positive pair
         
-        # Negative pairs
+        #negative pairs
         for i in range(take_count):
             anchor_path = os.path.join(ANC_PATH, selected_anchors[i])
             negative_path = os.path.join(NEG_PATH, selected_negatives[i])
@@ -181,21 +157,21 @@ def train_model():
             
             anchors.append(anchor_img)
             comparisons.append(negative_img)
-            labels.append(0.0)  # Negative pair
+            labels.append(0.0)  #for negative pair
         
         return (np.array(anchors), np.array(comparisons), np.array(labels))
     
-    # Dataset oluştur
+    #create the dataset
     anchors_array, comparisons_array, labels_array = create_simple_dataset()
     
     print(f"Dataset boyutu: {len(anchors_array)} örnek")
     
-    # Modeli oluştur
+    #creation of the model
     try:
         siamese_model = make_siamese_model()
         print("✓ Model başarıyla oluşturuldu!")
         
-        # Modeli compile et
+        #model compilar
         siamese_model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
             loss='binary_crossentropy',
@@ -207,12 +183,10 @@ def train_model():
         import traceback
         traceback.print_exc()
         return None
-    
-    # BASİT EĞİTİM
+
     EPOCHS = 3
     
     print(f"\nEğitim başlıyor... ({EPOCHS} epoch)")
-    
     try:
         history = siamese_model.fit(
             [anchors_array, comparisons_array],
@@ -223,10 +197,9 @@ def train_model():
             verbose=1,
             shuffle=True
         )
-        
         print("✓ Eğitim başarıyla tamamlandı!")
         
-        # Sonuçları göster
+        #final metrics
         final_loss = history.history['loss'][-1]
         final_accuracy = history.history['accuracy'][-1]
         print(f"Final Loss: {final_loss:.4f}, Final Accuracy: {final_accuracy:.4f}")
@@ -237,7 +210,7 @@ def train_model():
         traceback.print_exc()
         return None
 
-    # Modeli kaydet
+    #save the model
     try:
         siamese_model.save('siamese_model.h5')
         print("✓✓✓ Model 'siamese_model.h5' olarak KAYDEDİLDİ! ✓✓✓")
@@ -251,7 +224,7 @@ def train_model():
         print(f"Model kaydetme hatası: {e}")
         return None
 
-# Verify fonksiyonu
+#verify function (to verify wow)
 def verify(model, detection_threshold=0.5, verification_threshold=0.5):
     results = []
     input_image_path = os.path.join(INPUT_IMAGE_DIR, 'input_image.jpg')
@@ -272,7 +245,7 @@ def verify(model, detection_threshold=0.5, verification_threshold=0.5):
             input_img = preprocess(input_image_path)
             validation_img = preprocess(os.path.join(VERIFICATION_IMAGES_DIR, image))
             
-            # Batch dimension ekle
+            #add batch dimension to images
             input_batch = tf.expand_dims(input_img, axis=0)
             validation_batch = tf.expand_dims(validation_img, axis=0)
             
@@ -293,25 +266,20 @@ def verify(model, detection_threshold=0.5, verification_threshold=0.5):
     
     return results, verified
 
-# Ana fonksiyon
+#main application loop
 def main():
     print("=== DEEP FACIAL RECOGNITION ===")
     print("Kamera açılıyor...")
     
-    # Gerekli verileri hazırla
+    #preparation of necessary data
     prepare_negative_data()
     prepare_verification_data()
     
-    # Model kontrolü
+    #control if a pretrained model exists
     model = None
     if os.path.exists('siamese_model.h5'):
         try:
-            # Model yüklenirken L1Dist özel katmanı tanıtılmalı
-            model = tf.keras.models.load_model(
-                'siamese_model.h5', 
-                custom_objects={'L1Dist': L1Dist}, 
-                compile=False
-            )
+            model = tf.keras.models.load_model('siamese_model.h5', compile=False)
             print("✓ Önceden eğitilmiş model yüklendi!")
         except Exception as e:
             print(f"Model yükleme hatası: {e}")
@@ -337,7 +305,7 @@ def main():
         if not ret:
             break
             
-        # Frame crop
+        #crop the image as neeeded
         if frame.shape[0] > 250 and frame.shape[1] > 450:
             frame_cropped = frame[120:120+250, 200:200+250, :]
         else:
@@ -366,7 +334,7 @@ def main():
             print("Input image kaydedildi, doğrulama yapılıyor...")
             try:
                 results, verified = verify(model, 0.5, 0.5)
-                status = "DOĞRULANDI ✅" if verified else "DOĞRULANMADI ❌"
+                status = "DOĞRULANDI ✅" if verified else "DOĞRULANMADA ❌"
                 print(f"SONUÇ: {status}")
             except Exception as e:
                 print(f"Doğrulama hatası: {e}")
